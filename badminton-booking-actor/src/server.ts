@@ -6,7 +6,7 @@ app.use(express.json());  // Support JSON payloads
 
 const PORT = 3333;
 
-app.get('/run-actor', async (req:any, res: any) => {
+app.get('/run-actor', async (_req: any, res: any) => {
     try {
         // Run the actor with the URL
         const result = await getData();

@@ -1,9 +1,6 @@
 // Axios - Promise based HTTP client for the browser and node.js (Read more at https://axios-http.com/docs/intro).
 import axios from 'axios';
-// Cheerio - The fast, flexible & elegant library for parsing and manipulating HTML and XML (Read more at https://cheerio.js.org/).
-import * as cheerio from 'cheerio';
-// Apify SDK - toolkit for building Apify Actors (Read more at https://docs.apify.com/sdk/js/).
-import { Actor } from 'apify';
+import { chromium, Page } from 'playwright'
 
 type EmptySlot = {
     url: string;
@@ -14,90 +11,112 @@ type EmptySlot = {
 
 type UrlHandler = {
     url: string;
-    handler: ($: cheerio.CheerioAPI, url: string) => EmptySlot[];
+    handler: (page: Page, label: string) => Promise<EmptySlot[]>;
 };
 
-const bizzy_handler = ($: cheerio.CheerioAPI, url: string) => {
+const bizzy_handler = async (page: Page, label: string) => {
     const results: EmptySlot[] = [];
+    await page.waitForSelector('div#resContainer div.event');
+    const tables = await page.locator("table.schedule").all();
+    const overlayBookingDivs = await page.locator('div#resContainer div.event').all()
+    const overlayBookingDivsBoxes = await Promise.all(overlayBookingDivs.map(async el => await el.boundingBox()));
 
-    // For each schedule table
-    $('table.schedule').each((_i, tableElem) => {
-        const $table = $(tableElem);
-        // Extract the date from the caption span (e.g., "St 26/2")
-        const date = $table.find('caption span.group.date').first().text().trim();
 
-        // Extract time slot headers from the heading row.
-        // We assume the first <th> is the day header (or court header placeholder)
+    for (const table of tables) {
+        const date = (await table.locator("caption span.group.date").first().textContent())?.trim();
+
         const times: string[] = [];
-        $table.find('tr.heading th').each((index, thElem) => {
-            if (index === 0) return; // skip the first cell
-            const timeText = $(thElem).text().trim();
+        const blocks = await table.locator('tr.heading th').all();
+        for (const [index, block] of blocks.entries()) {
+            if (index === 0)
+                continue; // skip the first cell
+            const timeText = (await block.textContent())?.trim();
             if (timeText) {
                 times.push(timeText);
             }
-        });
+        }
 
-        // For each row (each court)
-        $table.find('tr').not('.heading').each((_rowIndex, rowElem) => {
-            const $row = $(rowElem);
-            // First cell (a <th>) is the court name
-            const court = $row.find('th').first().text().trim();
+        const rows = await table
+            .locator("tr")
+            .filter({
+                hasNot: table.locator(".heading")
+            }).all();
 
-            // Iterate over each <td> (each time slot cell)
-            $row.find('td').each((cellIndex, cellElem) => {
-                const cellText = $(cellElem).text().trim();
-                // If the cell is empty, then the slot is available.
-                if (cellText === '') {
-                    // Use the corresponding time from our headers (matching by cellIndex)
-                    const timeSlot = times[cellIndex];
-                    if (timeSlot) {
-                        results.push({
-                            url: url,
-                            date,
-                            hour: `${timeSlot} (${court})`
-                        });
+        for (const row of rows) {
+            const court = (await row.locator('th').first().textContent())?.trim();
+
+            const allRowCells = await row
+                .locator('td')
+                .all();
+            for (const [cellIndex, bookingSlot] of allRowCells.entries()) {
+                const isPastTime = (await bookingSlot.getAttribute('class'))?.includes('pastTime');
+                const timeSlot = times[cellIndex];
+
+                let bookingBlok: EmptySlot | null = {
+                    url: label,
+                    date: date || 'N/A',
+                    hour: `${timeSlot} (${court})`
+                }
+
+                if (!isPastTime) {
+                    const timeSlotBox = await bookingSlot.boundingBox();
+                    for (const bookingDiv of overlayBookingDivsBoxes) {
+                        if (timeSlotBox && bookingDiv) {
+                            const isCovered = bookingDiv.x < timeSlotBox.x + timeSlotBox.width / 2 &&
+                                bookingDiv.x + bookingDiv.width > timeSlotBox.x + timeSlotBox.width / 2 &&
+                                bookingDiv.y < timeSlotBox.y + timeSlotBox.height / 2 &&
+                                bookingDiv.y + bookingDiv.height > timeSlotBox.y + timeSlotBox.height / 2;
+                            if (isCovered) {
+                                bookingBlok = null
+                                break;
+                            }
+                        }
+                    }
+
+                    if (timeSlot && bookingBlok) {
+                        results.push(bookingBlok);
                     }
                 }
-            });
-        });
-    });
+            }
+        }
+    }
 
     return results;
 }
 
-const sprint_handler = ($: cheerio.CheerioAPI, url: string) => {
+const sprint_handler = async (_page: Page, _label: string) => {
     const results: EmptySlot[] = [];
 
-    // In this HTML, booking cards are inside the table with id "tableLekce"
-    // Each card is contained in a div with class "mycard_skupinovky2"
-    $('#tableLekce .mycard_skupinovky2').each((_i, elem) => {
-        const $card = $(elem);
-        // Extract court name (can be a comma-separated list)
-        const courtName = $card.find('input[data-identifi="KurtyName"]').attr('value')?.trim() || '';
-        // Extract date (as provided in the hidden field)
-        const date = $card.find('input[data-identifi="DatumLekce2"]').attr('value')?.trim() || '';
-        // Extract the time slot from the visible element (e.g., "20:00 - 21:00")
-        const timeSlot = $card.find('span[data-identifi="SkupCasOdDo"]').text().trim();
+    // // In this HTML, booking cards are inside the table with id "tableLekce"
+    // // Each card is contained in a div with class "mycard_skupinovky2"
+    // $('#tableLekce .mycard_skupinovky2').each((_i, elem) => {
+    //     const $card = $(elem);
+    //     // Extract court name (can be a comma-separated list)
+    //     const courtName = $card.find('input[data-identifi="KurtyName"]').attr('value')?.trim() || '';
+    //     // Extract date (as provided in the hidden field)
+    //     const date = $card.find('input[data-identifi="DatumLekce2"]').attr('value')?.trim() || '';
+    //     // Extract the time slot from the visible element (e.g., "20:00 - 21:00")
+    //     const timeSlot = $card.find('span[data-identifi="SkupCasOdDo"]').text().trim();
 
-        // Only push if we have the basic info:
-        if (date && timeSlot && courtName) {
-            results.push({
-                url: url,
-                date,
-                hour: `${timeSlot} (${courtName})`
-            });
-        }
-    });
+    //     // Only push if we have the basic info:
+    //     if (date && timeSlot && courtName) {
+    //         results.push({
+    //             url: label,
+    //             date,
+    //             hour: `${timeSlot} (${courtName})`
+    //         });
+    //     }
+    // });
 
     return results;
 
 }
 
 const urlsHandlers: UrlHandler[] = [
-    {
-        url: "https://memberzone.cz/sprint_tenis/Sportoviste.aspx?ID_Sportoviste=3&NAZEV=Badminton+hala",
-        handler: sprint_handler
-    },
+    // {
+    //     url: "https://memberzone.cz/sprint_tenis/Sportoviste.aspx?ID_Sportoviste=3&NAZEV=Badminton+hala",
+    //     handler: sprint_handler
+    // },
     {
         url: "https://sportkuklenska.e-rezervace.cz/Branch/pages/Schedule.faces",
         handler: bizzy_handler
@@ -119,17 +138,14 @@ const urlsHandlers: UrlHandler[] = [
 
 export const getData = async (): Promise<EmptySlot[]> => {
     const bookings: EmptySlot[] = [];
+    const browser = await chromium.launch({ headless: true });
 
     for (const { url, handler } of urlsHandlers) {
-        // Fetch the HTML content of the page.
-        const response = await axios.get(url);
-
-        // Parse the downloaded HTML with Cheerio to enable data extraction.
-        const $ = cheerio.load(response.data);
+        const page = await browser.newPage();
+        await page.goto(url, { waitUntil: 'networkidle' });
 
         // Use the handler to process the page and get the result.
-        const result = handler($, url);
-
+        const result = await handler(page, url);
         // Merge the result from the handler with the headings.
         bookings.push(...result);
     }
