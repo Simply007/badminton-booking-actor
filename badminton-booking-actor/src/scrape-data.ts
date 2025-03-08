@@ -1,6 +1,6 @@
 // Axios - Promise based HTTP client for the browser and node.js (Read more at https://axios-http.com/docs/intro).
 import axios from 'axios';
-import { chromium, Page } from 'playwright'
+import { chromium, Locator, Page } from 'playwright'
 
 type EmptySlot = {
     url: string;
@@ -84,51 +84,121 @@ const bizzy_handler = async (page: Page, label: string) => {
     return results;
 }
 
-const sprint_handler = async (_page: Page, _label: string) => {
+const sprint_handler = async (page: Page, label: string) => {
     const results: EmptySlot[] = [];
+    await page.waitForSelector('table#tableLekce .mycard_skupinovky2');
+    const tables = await page.locator('table#tableLekce .mycard_skupinovky2').all();
 
-    // // In this HTML, booking cards are inside the table with id "tableLekce"
-    // // Each card is contained in a div with class "mycard_skupinovky2"
-    // $('#tableLekce .mycard_skupinovky2').each((_i, elem) => {
-    //     const $card = $(elem);
-    //     // Extract court name (can be a comma-separated list)
-    //     const courtName = $card.find('input[data-identifi="KurtyName"]').attr('value')?.trim() || '';
-    //     // Extract date (as provided in the hidden field)
-    //     const date = $card.find('input[data-identifi="DatumLekce2"]').attr('value')?.trim() || '';
-    //     // Extract the time slot from the visible element (e.g., "20:00 - 21:00")
-    //     const timeSlot = $card.find('span[data-identifi="SkupCasOdDo"]').text().trim();
+    for (const table of tables) {
+        // In this HTML, booking cards are inside the table with id "tableLekce"
+        // Each card is contained in a div with class "mycard_skupinovky2"
+        const cards = await page.locator('div.mycard_skupinovky2').all();
+        for (const card of cards) {
+            // Extract court name (can be a comma-separated list)
+            const courtName = (await card.locator('input[data-identifi="KurtyName"]').getAttribute('value'))?.trim() || '';
+            // Extract date (as provided in the hidden field)
+            const date = (await card.locator('input[data-identifi="DatumLekce2"]').getAttribute('value'))?.trim() || '';
+            // Extract the time slot from the visible element (e.g., "20:00 - 21:00")
+            const timeSlot = (await card.locator('span[data-identifi="SkupCasOdDo"]').textContent())?.trim() || '';
 
-    //     // Only push if we have the basic info:
-    //     if (date && timeSlot && courtName) {
-    //         results.push({
-    //             url: label,
-    //             date,
-    //             hour: `${timeSlot} (${courtName})`
-    //         });
-    //     }
-    // });
+            // Only push if we have the basic info:
+            if (date && timeSlot && courtName) {
+                results.push({
+                    url: label,
+                    date: date,
+                    hour: `${timeSlot} (${courtName})`
+                });
+            }
+        };
+    }
 
     return results;
 
 }
 
+const get_viktoria_next_day = async (page: Page) => {
+    const days = await page.locator('#timelineCalendar ul li').all();
+    for (let i = 0; i < days.length; i++) {
+        if ((await days[i].getAttribute('class'))?.includes('active')) {
+            return days[i + 1].locator('a').first();
+        }
+    }
+    throw new Error("No link to next day")
+}
+
+const viktoria_handler = async (page: Page, label: string) => {
+    const results: EmptySlot[] = [];
+    await page.waitForSelector('#timelineCalendar ul li.active');
+
+    const NUM_DAYS = 7;
+    const days = await page.locator('#timelineCalendar ul li').all();
+
+    for (let i = 0; i < NUM_DAYS; i++) {
+
+        const current_date = await page.locator("section#schedule_holder div#day_actual").innerText()
+
+        const courtBlockHours = (await page.locator("div#hours_head table.schedule tr td").all());
+        const courtBlockHoursMap = await courtBlockHours.reduce<Promise<{ [key: string]: string }>>(async (accPromise, block) => {
+            const acc: { [key: string]: string } = await accPromise;
+            const id = await block.getAttribute('id');
+            const value = (await block.innerText()).trim();
+            if (id && value) {
+                acc[id] = value;
+            }
+            return acc;
+        }, Promise.resolve({}));
+
+        const courtLabels = await page.locator('div#activities_halls > ul li:has(span:text("Badminton")) > ul > li').allInnerTexts();
+
+        const courtsSlots = await page.locator('div#hours_body div.table_schedule_viewport div.table_schedule_holder table.schedule tr[data-parent-row-id]').all();
+        for (let j = 0; j < courtsSlots.length; j++) {
+            const courtSlotLine = courtsSlots[j];
+
+            const blocks = await courtSlotLine.locator("td").filter({ hasNot: courtSlotLine.locator("td.disabled") }).all()
+
+            for(let k = 0; k < blocks.length; k++) {
+                const block = blocks[k];
+                const blockId = await block.getAttribute("data-time-id")
+                if(!blockId) {
+                    // disabled or booked
+                    continue;
+                }
+                const timeSlot = courtBlockHoursMap[blockId]
+                if(!timeSlot) {
+                    continue;
+                }
+                const courtName = courtLabels[j]
+                if (current_date && timeSlot && courtName) {
+                    results.push({
+                        url: label,
+                        date: current_date,
+                        hour: `${timeSlot} (${courtName})`
+                    });
+                }
+            }
+        }
+
+        const next_day_link = await get_viktoria_next_day(page);
+        await next_day_link.click();
+        await page.waitForSelector('div#hours_body div.table_schedule_viewport div.table_schedule_holder table.schedule');
+    }
+
+    return results;
+}
+
 const urlsHandlers: UrlHandler[] = [
-    // {
-    //     url: "https://memberzone.cz/sprint_tenis/Sportoviste.aspx?ID_Sportoviste=3&NAZEV=Badminton+hala",
-    //     handler: sprint_handler
-    // },
+    {
+        url: "https://memberzone.cz/sprint_tenis/Sportoviste.aspx?ID_Sportoviste=3&NAZEV=Badminton+hala",
+        handler: sprint_handler
+    },
     {
         url: "https://sportkuklenska.e-rezervace.cz/Branch/pages/Schedule.faces",
         handler: bizzy_handler
     },
-    // {
-    //     url: "https://rezervace.centrumviktoria.cz:18443/timeline/day?tabIdx=1&criteriaTimestamp&resetFilter=true#timelineCalendar",
-    //     handler: ($: cheerio.CheerioAPI) => {
-    //         // Implement the handler logic for this URL
-    //         // Example: return { url, date: '2023-10-03', hour: '12:00' };
-    //         return { url: "https://rezervace.centrumviktoria.cz:18443/timeline/day?tabIdx=1&criteriaTimestamp&resetFilter=true#timelineCalendar", date: '2023-10-03', hour: '12:00' };
-    //     }
-    // },
+    {
+        url: "https://rezervace.centrumviktoria.cz:18443/timeline/day?tabIdx=1&criteriaTimestamp&resetFilter=true#timelineCalendar",
+        handler: viktoria_handler
+    },
     {
         url: "https://xarena.e-rezervace.cz/Branch/pages/Schedule.faces",
         handler: bizzy_handler
